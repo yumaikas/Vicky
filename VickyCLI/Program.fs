@@ -5,15 +5,18 @@ open System
 let repl(vm: VM) =
     let mutable exit = false
     let mutable evalLine = 0
-    vm.env <- vm.env.Add(
+    vm.env.values <- vm.env.values.Add(
         "exit", 
-        nativeFn "repl::exit" (fun _ _ env  -> exit <- true; VickyValue.Null, env))
+        nativeFn "repl::exit" (fun _ _ env  -> exit <- true; List([]), env))
 
     while not exit do
         try
            printf "user> "
-           let result = evalString vm (Console.ReadLine()) (sprintf "repl:%A" evalLine)
-           printfn "%s" (formatValue result)
+           let result = evalString vm (Console.ReadLine()) (sprintf "repl:%A" evalLine) 
+
+           for s in result  do
+               printf "%s " (formatValue s)
+           printfn ""
            evalLine <- evalLine + 1
         with
         | ParseFailed({ 
@@ -27,8 +30,8 @@ let repl(vm: VM) =
 
 [<EntryPoint>]
 let main(args) =
-    let vm = VM(defaultEnv, [])
-    test vm
+    let vm = VM(defaultEnv)
+    // test vm
     printfn ""
     repl vm
     0
