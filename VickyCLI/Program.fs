@@ -27,10 +27,12 @@ let repl(vm: VM) =
         }) -> (printfn "Parse failure in %A:%A:%A:\n\t%A" source l c m)
         | CannotEvalError(m) -> (printfn "%A" m)
         | InvalidNameException(m) -> (printfn "%A" m)
+        | TypeError(m) -> (printfn "%A" m)
 
 [<EntryPoint>]
 let main(args) =
-    let vm = VM(defaultEnv)
+    let env = defaultEnv
+    let vm = VM(env)
     // test vm
     printfn ""
     repl vm

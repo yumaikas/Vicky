@@ -1,6 +1,7 @@
 ﻿module Interpreter
 
 open System
+open System.Diagnostics
 open System.IO
 
 type ParseFailureInfo = { message: string; line: int; column: int; from: string }
@@ -22,7 +23,13 @@ type PositionAnnotatedCode =
 let posFromSource (code: char list) (from: string) =
     PositionAnnotatedCode(code, 0, 0, from)
     
+let mutable tracing = false
+
 let readN (n: int) (code: PositionAnnotatedCode) =
+    let st = new StackTrace(true)
+    let depthStr = new String('-', st.FrameCount)
+    if tracing then
+        printfn "reading %02i chars at %s:%s " n depthStr (st.GetFrame(1).GetMethod().Name)
     let mutable newColumn = code.column
     let mutable newLine = code.line
     let mutable newCode = code.code
@@ -39,20 +46,11 @@ let readN (n: int) (code: PositionAnnotatedCode) =
 
 let failedAt (message: string) (pos: PositionAnnotatedCode) =
     ParseFailed { 
-        message=message;
+        message = message;
         column = pos.column;
         line = pos.line;
         from = pos.from;
     }
-
-
-type Special =
-    | Add
-    | Mult
-    | Div
-    | Sub
-    | And
-    | Or
 
 type Symbol = string
 
@@ -69,20 +67,10 @@ type VickyValue =
     | Dict of Map<VickyValue, VickyValue>
     | Atom of VickyValue ref
 
-    // Feels like a runtime construct
-    // | ResolvedSymbol of Symbol * VickyValue
-    // Special forms
-    (* 
-    | Define of Symbol * VickyTerm
-    | If of VickyTerm * VickyTerm * VickyTerm
-    | When of VickyTerm * VickyTerm
-    | While of VickyTerm * VickyTerm list
-    *)
-
 and NativeFunc = 
     val fullName: string // Needs to be a fully qualified name. Might need to reify that idea laster
     val fn: VickyValue list -> VM -> Env -> VickyValue * Env
-    val isMacro: bool
+    val mutable isMacro: bool
     new(name: string, fn0: VickyValue list -> VM -> Env -> VickyValue * Env) = 
         { fullName = name; fn = fn0; isMacro = false }
     new(name: string, fn0: VickyValue list -> VM -> Env -> VickyValue * Env, isMacro) = 
@@ -102,12 +90,13 @@ and NativeFunc =
 and DefinedFunc =
     val fullName: string
     val args: Symbol list
+    val defEnv: Env
     val body: VickyValue list
-    val isMacro: bool
-    new(name: string, argsIn: Symbol list, bodyIn: VickyValue list) = 
-        { fullName = name; args = argsIn; body = bodyIn; isMacro = false }
-    new(name: string, argsIn: Symbol list, bodyIn: VickyValue list, isMacro: bool) = 
-        { fullName = name; args = argsIn; body = bodyIn; isMacro = isMacro }
+    val mutable isMacro: bool
+    new(name: string, argsIn: Symbol list, bodyIn: VickyValue list, outerEnv: Env) = 
+        { fullName = name; args = argsIn; body = bodyIn; defEnv = outerEnv; isMacro = false }
+    new(name: string, argsIn: Symbol list, bodyIn: VickyValue list, outerEnv: Env, isMacro: bool) = 
+        { fullName = name; args = argsIn; body = bodyIn; defEnv = outerEnv; isMacro = isMacro }
 
 
     override this.ToString() =
@@ -150,11 +139,13 @@ let isFunc (value: VickyValue) =
 let isList (value: VickyValue) =
     match value with
     | List(_) -> true
+    | Nil -> true
     | _ -> false
 
 let asList (value: VickyValue) =
     match value with
     | List(l) -> l
+    | Nil -> []
     | _ -> raise (TypeError (sprintf "Tried to cast non-list %A to list!" value))
 
 let addToEnv (env: Env) (key: Symbol) (value: VickyValue) =
@@ -202,7 +193,7 @@ let isIdent(c: char) =
     match c with 
     | c when isAlNum c -> true
     | '+' | '-' | '/' | '*' | '$' | '%' | '@' 
-    | '!' | '?' | '^' | '&' | '<' | '>' | '.' -> true
+    | '!' | '?' | '^' | '&' | '<' | '>' | '.' | '=' -> true
     | _ -> false
 
 let assertOrParseError (pos: PositionAnnotatedCode) (isValid: bool) (message: string) =
@@ -231,6 +222,31 @@ let isValidTermBorder(c: char list) =
     | '}' :: _ -> true
     | _ -> false
 
+type QuoteLit  =
+| LitQuote
+| LitQuasiquote
+| LitUnquote
+| LitSplice
+
+let quoteMap (c: char)  = 
+    match c with
+    | '\'' -> Some LitQuote
+    | '~' -> Some LitQuasiquote
+    | ',' -> Some LitUnquote
+    | ';' -> Some LitSplice
+    | _ -> None
+
+let isQuoteChar (c: char) = (quoteMap c).IsSome
+
+let quoteToSymbol (lit: QuoteLit option) (pos: PositionAnnotatedCode) =
+    match lit with
+    | Some LitQuote -> "quote"
+    | Some LitQuasiquote -> "quasiquote"
+    | Some LitUnquote -> "unquote"
+    | Some LitSplice -> "splice"
+    | None -> raise (failedAt "Tried to symbolize a non-quote char!" pos)
+
+
 let handleStringEscapesSeqs (s: string) =
     s.Replace("\\n", "\n").Replace("\\r", "\r").Replace("\\t", "\t").Replace("\\\\", "\\")
 
@@ -257,7 +273,6 @@ let parseComment(input: PositionAnnotatedCode) =
     let output = readN (comment.Length) input
     let retVal = Str(comment |> listToString)
     retVal, output
-
 
 let parseSymbol(input: PositionAnnotatedCode) =
     assertOrParseError input (isIdent input.code.Head) "Tried to call parseSymbol with non identifier starting character!"
@@ -315,134 +330,79 @@ let genAnonName () =
     let ret = sprintf "ANON:[%A]" anonFnCounter.Value 
     ret
 
-    (*
-
-let parseDefnLiteral (terms: VickyTerm list) (pos: PositionAnnotatedCode) =
-    match terms with
-    | VickyTerm.Symbol(name) :: VickyTerm.List(argspec) :: body 
-        when (List.forall termIsSymbol  argspec) -> 
-            Define(name, Func(DefinedFunc(name, List.map termToSymbol argspec, [body])))
-    | VickyTerm.Symbol(name) :: VickyTerm.List([VickyTerm.List([])]) :: body -> 
-            Define(name, Func(DefinedFunc(name, [], [body])))
-    | _ -> raise (failedAt (sprintf "Invalid defn %A" terms) pos)
-
-let parseIfForm(terms: VickyTerm list) (pos: PositionAnnotatedCode) =
-    // RESUME: Build out IF form here
-    match terms with
-    | [cond; true_branch; false_branch] -> If(cond, true_branch, false_branch)
-    | [cond; true_branch; ] -> When(cond, true_branch)
-    // TODO: Better error messages here
-    | _ -> raise (failedAt (sprintf "Invalid if expression %A" terms) pos)
-
-let parseWhileForm(terms: VickyTerm list) (pos: PositionAnnotatedCode) =
-    match terms with
-    | cond :: rest when rest.Length > 0 -> While(cond, rest)
-    | _ -> raise (failedAt (sprintf "Invalid if expression %A" terms) pos)
-    *)
-
-let rec parseTerms(baseInput: PositionAnnotatedCode) (seekingDelim: char option): VickyValue list * PositionAnnotatedCode =
+let rec parseTerms (baseInput: PositionAnnotatedCode): VickyValue * PositionAnnotatedCode =
     let mutable input = baseInput 
-    let mutable keepGoing = true 
-    let mutable results: VickyValue list = [] 
+    // let mutable keepGoing = true 
+    // let mutable results: VickyValue = Nil
+    match input.code with
+    //| c :: rest when isSpace c -> 
+    //    input <- readN 1 input
+    | c :: _ when isNum c -> parseNumber input
+    | '-' :: c :: _ when isNum c -> parseNumber input
+    | ':' :: c :: _ when isIdent c -> parseKeyword (readN 1 input)
+    | 'n' :: 'i' :: 'l' :: _ -> Nil, readN 3 input
+    | '#' :: _ -> parseComment input
+    | c :: _ when isIdent c -> parseSymbol input
+    | q :: '(' :: _ when isQuoteChar q -> 
+        let (value, rem) = parse (readN 2 input) (Some ')')
+        List(Symbol(quoteToSymbol (quoteMap q) rem) :: [List(value)]), rem
+    | q :: '[' :: _ when isQuoteChar q ->
+        let (value, rem) = parse (readN 2 input) (Some ']')
+        List(Symbol(quoteToSymbol (quoteMap q) rem) :: [Vector(value |> Array.ofList)]), rem
+    | q :: '{' :: _ when isQuoteChar q ->
+        let (value, rem) = parse (readN 2 input) (Some '}')
+        if (value.Length % 2) <> 0 then
+            raise (failedAt "Dict needs even number of elements" rem)
+        let d = 
+            List.chunkBySize 2 value 
+            |> List.map (fun [a; b] -> a, b) 
+            |> Map.ofList
+            |> Dict
+        (List(Symbol(quoteToSymbol (quoteMap q) rem) :: [d])), rem
+    | q :: _ when isQuoteChar q ->
+        let (value, rem) = parseTerms (readN 1 input)
+        (List(Symbol(quoteToSymbol (quoteMap q) input) :: [value])), rem
+    | '"' :: rest -> parseString (readN 1 input)
+    | '(' :: rest -> 
+        let (value, rem) = parse (readN 1 input) (Some ')')
+        (VickyValue.List value), rem
+    | '[' :: rest ->
+        let (value, rem) = parse (readN 1 input) (Some ']')
+        (Vector (value |> Array.ofList)), rem
+    | '{' :: rest ->
+        let (value, rem) = parse (readN 1 input) (Some '}')
+        if (value.Length % 2) <> 0 then
+            raise (failedAt "Dict needs even number of elements" input)
+        let d = 
+            List.chunkBySize 2 value 
+            |> List.map (fun [a; b] -> a, b) 
+            |> Map.ofList
+            |> Dict
+        d, rem
+    | c -> raise (failedAt (sprintf "Unexpected character %A" c) input)
 
-    while keepGoing do
-        match input.code with
-        | c :: rest when isSpace c -> 
-            input <- readN 1 input
-        | c :: _ when isNum c -> 
-            let (value, rem) = parseNumber input
-            input <- rem
-            results <- value :: results
-        | '-' :: c :: _ when isNum c ->
-            let (value, rem) = parseNumber input
-            input <- rem
-            results <- value :: results
-        | ':' :: c :: _ when isIdent c ->
-            let (name, rem) = parseKeyword (readN 1 input)
-            input <- rem
-            results <- name :: results
-        | 'n' :: 'i' :: 'l' :: _ ->
-            input <- readN 3 input
-            results <- Nil :: results
-        | ';' :: _ -> 
-            let (_, rem) = parseComment input
-            input <- rem
-        | c :: _ when isIdent c ->
-            let (value, rem) = parseSymbol input
-            input <- rem
-            results <- value :: results
-        | '\'' :: '(' :: _ ->
-            let (value, rem) = parseTerms (readN 2 input) (Some ')')
-            input <- rem
-            results <- (List(Symbol("quote") :: [List(value)])) :: results
-        | '\'' :: c :: _ when isNum c -> 
-            let (value, rem) = parseNumber (readN 1 input)
-            input <- rem
-            results <- List(Symbol("quote") :: [value]) :: results
-        | '\'' :: '"' :: _ ->
-            let (value, rem) = parseString (readN 2 input)
-            input <- rem
-            results <- List(Symbol("quote") :: [value]) :: results
-        | '\'' :: c :: _ when isIdent c -> 
-            let (value, rem) = parseSymbol (readN 1 input)
-            input <- rem
-            results <- List(Symbol("quote") :: [value]) :: results
-        | '"' :: rest -> 
-            let (value, rem) = parseString (readN 1 input)
-            input <- rem
-            results <- value :: results
-        | '(' :: rest -> 
-            let (value, rem) = parseTerms (readN 1 input) (Some ')')
-            input <- rem
-            results <- (VickyValue.List value) :: results
-        | '[' :: rest ->
-            let (value, rem) = parseTerms (readN 1 input) (Some ']')
-            input <- rem
-            results <- (Vector (value |> Array.ofList)) :: results
-        | '{' :: rest ->
-            let (value, rem) = parseTerms (readN 1 input) (Some '}')
-            input <- rem
-            if (value.Length % 2) <> 0 then
-                raise (failedAt "Dict needs even number of elements" input)
-            let d = 
-                List.chunkBySize 2 value 
-                |> List.map (fun [a; b] -> a, b) 
-                |> Map.ofList
-                |> Dict
-            results <- d :: results
-        | c :: _ when seekingDelim.IsSome && seekingDelim.Value = c -> 
-            keepGoing <- false
-            input <- readN 1 input
-        | [] when seekingDelim.IsSome ->
-            raise (failedAt (sprintf "Missing delimiter %A" seekingDelim.Value) input)
-        | [] when seekingDelim.IsNone -> 
-            input <- input
-            keepGoing <- false
-        | c -> raise (failedAt (sprintf "Unexpected character %A" c) input)
-    List.rev results, input
-
-
-let parse (input: PositionAnnotatedCode) = 
+and parse (input: PositionAnnotatedCode) (endingDelim: char option) = 
     let mutable input = input
     let mutable results = []
+    let mutable keepGoing = true
 
-    while not input.code.IsEmpty do
+    while keepGoing && not input.code.IsEmpty do
         match input.code with
         | ' ' :: _ | '\t' :: _ | '\r' :: _ | '\n' :: _ -> 
             input <- readN 1 input
-        | '(' :: _ -> 
-            let (term, rem) = parseTerms (readN 1 input) (Some ')')
-            input <- rem
-            results <- VickyValue.List(term) :: results
-        | '\'' :: '(' :: _ ->
-            let (term, rem) = parseTerms (readN 2 input) (Some ')')
-            input <- rem
-            results <- List(Symbol("quote") :: [List(term)]) :: results
+        | c :: _ when endingDelim.IsSome && endingDelim.Value = c -> 
+            keepGoing <- false
+            input <- readN 1 input
+        | [] when endingDelim.IsSome ->
+            raise (failedAt (sprintf "Missing delimiter %A" endingDelim.Value) input)
+        | [] when endingDelim.IsNone -> 
+            input <- input
+            keepGoing <- false
         | c ->
-            let (term, rem) = parseTerms input None
+            let (term, rem) = parseTerms input
             input <- rem
-            results <- List.append results (List.rev term)
-    List.rev results
+            results  <- term :: results
+    List.rev results, input
 
 
 let fnAdd (args: VickyValue list) (vm: VM) (env: Env) =
@@ -551,6 +511,25 @@ let fnGet (args: VickyValue list) (vm: VM) (env: Env) =
     | _ -> 
         Nil, env
 
+let fnFirst (args: VickyValue list) (vm: VM) (env: Env) = 
+    match args with
+    | List(ret :: _) :: _ ->
+        ret, env
+    | Vector(v) :: _ when v.Length >= 1 ->
+        v[0], env
+    | _ -> 
+        Nil, env
+let fnRest (args: VickyValue list) (vm: VM) (env: Env) =
+    match args with
+    | List(_ :: []) :: _ ->
+        Nil, env
+    | List(_ :: rest) :: _ ->
+        List(rest), env
+    | Vector(v) :: _ when v.Length >= 2 ->
+        List((Array.sub v 1 (v.Length - 1)) |> List.ofArray), env
+    | _ -> 
+        Nil, env
+
 let fnPut (args: VickyValue list) (vm: VM) (env: Env) =
     match args with
     | Dict(m) :: key :: value :: _ ->
@@ -596,13 +575,26 @@ let fnStrJoin(args: VickyValue list) (vm: VM) (env: Env) =
 let nativeFn name fn =
     Func(VickyFunc.Native(NativeFunc(name, fn)))
 
-let rec resolveSymbol (symbol: Symbol) (env: Env) =
+let rec resolveSymbol (symbol: Symbol) (env: Env): VickyValue option =
     if env.values.ContainsKey(symbol) then
-        env.values[symbol]
+        Some env.values[symbol]
     elif env.parent.IsNone then
-        raise (InvalidNameException (sprintf "Couldn't find value for name %A" symbol))
+        None
     else
         resolveSymbol symbol env.parent.Value
+
+let formatStackFrame (s: StackFrame) =
+    sprintf "%s:%s:%i" (s.GetFileName()) (s.GetMethod().Name) (s.GetFileLineNumber())
+
+let resolveSymbolOrDie (symbol: Symbol) (env: Env): VickyValue =
+    let resolved = resolveSymbol symbol env
+    if resolved.IsNone then
+        printf "" 
+        let st = new StackTrace(true)
+        let depthStr = new String('-', st.FrameCount)
+        printf "%s" (String.Join("\r\n", (st.GetFrames() |> Seq.map formatStackFrame)))
+        raise (InvalidNameException (sprintf "Couldn't find value for name %A" symbol))
+    resolved.Value
 
 let rec quasiquote (ast: VickyValue) =
     match ast with
@@ -612,41 +604,95 @@ let rec quasiquote (ast: VickyValue) =
         let mutable result: VickyValue = Nil
         for elt in (List.rev l) do
             match elt with
-            | List(Symbol("splice-unquote") :: second :: _) -> result <- List(Symbol("concat") :: second :: [result] )
+            | List(Symbol("splice") :: second :: _) -> result <- List(Symbol("concat") :: second :: [result] )
             | el -> result <- List(Symbol("cons") :: quasiquote el :: [result])
         result
     | Symbol(_) as s -> List(Symbol("quote") :: [s])
     | Dict(_) as d -> List(Symbol("quote") :: [d])
     | term -> term
 
-let rec eval_ast (vm: VM) (term: VickyValue)  =
+let isMacroValue (term: VickyValue option) =
     match term with
-    | Symbol(s) -> resolveSymbol s vm.env
+    | Some (Func(Defined(fn))) -> fn.isMacro
+    | Some (Func(Native(fn))) -> fn.isMacro
+    | _ -> false
+
+let isMacroCall (env: Env) (term: VickyValue) =
+    match term with
+    | List(Symbol(s) :: args) -> isMacroValue (resolveSymbol s env)
+    | _ -> false
+
+let rec eval_ast (vm: VM) (term: VickyValue) =
+    match term with
+    | Symbol(s) -> resolveSymbolOrDie s vm.env
     | List(l) -> List(List.map (EVAL vm) l)
     | Vector(v) -> Vector(Array.map (EVAL vm) v)
     | Dict(d) -> Dict(Map.map (fun _ v -> (EVAL vm) v) d)
     | term -> term
 
+and macroexpand (vm: VM) (term: VickyValue) = 
+    let mutable resultingTerm = term
+    while (isMacroCall vm.env resultingTerm) do
+        match resultingTerm with
+        | List(Symbol(s) :: args) as maybeMacro when isMacroCall vm.env maybeMacro ->
+            resultingTerm <- apply vm (List((resolveSymbolOrDie s vm.env) :: args))
+        | _ -> raise (CannotEvalError (sprintf "Should Not Happen in Macroexpand! %A" resultingTerm))
+    resultingTerm
+
+and unspliceArgs (args: VickyValue list) (vm: VM) =
+    // TODO: EVAL the splice argument here
+    let mutable result: VickyValue list = []
+    for elt in (List.rev args) do
+        match elt with
+        | List(Symbol("splice") :: ast :: _) ->
+            match (EVAL vm ast) with
+            | List(tosplice) ->
+                result <- List.append result tosplice
+            | Vector(tosplice) ->
+                result <- List.append result (List.ofArray tosplice)
+            | term ->
+                result <- term :: result
+        | term ->
+            result <- term :: result
+    result
+
 and apply (vm: VM) (newList: VickyValue) =
     match newList with
     | VickyValue.List(VickyValue.Func(VickyFunc.Native(fn)) :: args) -> 
+        let args = (unspliceArgs args vm)
         let (result, env) = fn.fn args vm vm.env
         result
     | VickyValue.List(VickyValue.Func(VickyFunc.Defined(fn)) :: args) -> 
-        vm.env <- Env(Map.empty, Some vm.env)
+        let oldEnv = vm.env
+        vm.env <- fn.defEnv
         let minLen = min args.Length fn.args.Length
-        for name, value in List.zip (List.take minLen fn.args) (List.take minLen args) do
-            vm.env <- addToEnv vm.env name (EVAL vm value)
+        let mutable currentArgName = fn.args
+        let mutable currentArgValue = (unspliceArgs args vm)
+        while not currentArgName.IsEmpty do
+            match currentArgName with
+            | "&" :: restArgName :: _ -> 
+                vm.env <- addToEnv vm.env restArgName (List(currentArgValue))
+                currentArgName <- []
+                currentArgValue <- []
+            | argName :: _ -> 
+                vm.env <- addToEnv vm.env argName currentArgValue.Head
+                currentArgValue <- currentArgValue.Tail
+                currentArgName <- currentArgName.Tail
+            | _ -> ()
+
+        // TODO: Figure out how to deal with argument errors
 
         let mutable ret = Nil
         for term in fn.body do
             ret <- EVAL vm term
+        vm.env <- oldEnv
         ret
-    | VickyValue.List(head :: args) -> raise (CannotEvalError (sprintf "Cannot eval %A" head))
+    | VickyValue.List(head :: args) as term -> 
+        raise (CannotEvalError (sprintf "Cannot eval %A" term))
     | _ -> raise (CannotEvalError "Should be impossible to reach this!")
 
 and EVAL (vm: VM) (term: VickyValue)  =
-    match term with
+    match (macroexpand vm term) with
     | List(l) when l.IsEmpty -> List([])
     | List(Symbol("def!") :: Symbol(name) :: value :: _) ->
         let evaled = EVAL vm value
@@ -662,7 +708,10 @@ and EVAL (vm: VM) (term: VickyValue)  =
                 ret <- (EVAL vm term)
                 vm.env <- addToEnv vm.env name ret    
             | _ -> raise (InvalidNameException (sprintf "Invalid binding %A" binding)) 
+        let ret = EVAL vm expr
+        vm.env <- vm.env.parent.Value
         ret
+
     | List(Symbol("if") :: cond :: true_form :: false_form :: _) ->
         match (EVAL vm cond) with
         | Boolean(false) | Nil -> EVAL vm false_form
@@ -672,19 +721,36 @@ and EVAL (vm: VM) (term: VickyValue)  =
         | Boolean(false) | Nil -> Nil
         | _ -> EVAL vm true_form
     | List(Symbol("fn*") :: List(l) :: body ) ->
-        Func(Defined(DefinedFunc((genAnonName ()), (List.map termToSymbol l), body)))
+        Func(Defined(DefinedFunc((genAnonName ()), (List.map termToSymbol l), body, vm.env)))
+    | List(Symbol("defmacro!") :: Symbol(name) :: value :: _) ->
+        let evaled = EVAL vm value
+        match evaled with
+        | Func(Defined(fn)) -> fn.isMacro <- true
+        | Func(Native(fn)) -> fn.isMacro <- true
+        | _ -> ()
+        vm.env.values <- vm.env.values.Add(name, evaled)
+        evaled
     | List(Symbol("quote") :: arg :: _) ->
         arg
-    | List(Symbol("quasiquote") :: (List(l) as ast) :: _) ->
+    | List(Symbol("splice") :: _) as form ->
+        form
+    | List(Symbol("quasiquote") :: ast :: _) ->
         let expanded = quasiquote ast
         EVAL vm expanded
+    | List(Symbol("macroexpand") :: (List(_) as mac) :: _) ->
+        macroexpand vm mac
+    | List(Symbol("do") :: forms) ->
+        let mutable ret = Nil
+        for f in forms do
+           ret <- EVAL vm f 
+        ret
     | List(_) as term -> 
         let newList = eval_ast vm term
         apply vm newList
     | term -> eval_ast vm term
 
 let evalString(vm: VM) (code: string) (from: string) = 
-    let ast = parse (posFromSource (code |> Seq.toList) from)
+    let (ast, _) = parse (posFromSource (code |> Seq.toList) from) None
 
     let result = List.map (EVAL vm) ast
     result
@@ -704,7 +770,7 @@ let fnSlurp (args: VickyValue list) (vm: VM) (env: Env) =
 let fnRead (args: VickyValue list) (vm: VM) (env: Env) =
     match args with
     | Str(input) :: _ -> 
-        let terms = parse (posFromSource (input |> List.ofSeq) "read")
+        let (terms, _) = parse (posFromSource (input |> List.ofSeq) "read") None
         terms.Head, env
     | _ -> raise (TypeError (sprintf "Invalid arguments to slurp read-string %A" args))
     
@@ -757,6 +823,10 @@ let fnConcat (args: VickyValue list) (vm: VM) (env: Env) =
         VickyValue.List(List.concat (toConcat |> Seq.ofList)), env
     | _ -> raise (TypeError (sprintf "Cannot cons using %A" args))
 
+let fnPrint (args: VickyValue list) (vm: VM) (env: Env) =
+    for arg in args do
+        printf "%A " (formatValue arg)
+    Nil, env
 
 let fnCwd(args: VickyValue list) (vm: VM) (env: Env) =
     Str(Directory.GetCurrentDirectory()), env
@@ -804,6 +874,8 @@ let defaultEnvValues: Map<Symbol, VickyValue> = (Map.ofList [
     ("eval", nativeFn "builtin::eval" fnEval)
     ("get", nativeFn "builtin::get" fnGet)
     ("put", nativeFn "builtin::put" fnPut)
+    ("first", nativeFn "builtin::first" fnFirst)
+    ("rest", nativeFn "builtin::rest" fnRest)
     ("atom", nativeFn "builtin::atom" fnAtom)
     ("atom?", nativeFn "builtin::atom?" fnAtomPred)
     ("deref", nativeFn "builtin::deref" fnDeref)
@@ -818,6 +890,7 @@ let defaultEnvValues: Map<Symbol, VickyValue> = (Map.ofList [
     ("os/cd", nativeFn "os::cd" fnCd)
     ("os/dir", nativeFn "os::dir" fnOsDir)
     ("os/getenv", nativeFn "os::getenv" fnOsGetEnv)
+    ("print", nativeFn "builtin::print" fnPrint)
     // ("dofile", nativeFn "builtin::dofile" fnDoFile)
     ("true", Boolean(true))
     ("false", Boolean(false))
@@ -827,5 +900,27 @@ let defaultEnv =
     let env = Env (defaultEnvValues, None)
     let vm = VM(env)
     ignore (evalString vm "(def! not (fn* (a) (if a false true)))" "boot")
-    ignore (evalString vm """(def! load-file (fn* (f) (eval (read-string (str "(do " (slurp f) "\nnil)" )))))""" "boot") 
+    ignore (evalString vm "(def! nth get)" "boot") // Will need to change this later
+    ignore (evalString vm """
+        (def! load-file 
+            (fn* (f) (eval (read-string (str "(do " (slurp f) "\nnil)" )))))
+    """ "boot") 
+    ignore (evalString vm """
+    (defmacro! cond 
+        (fn* (& xs) 
+            (if (> (count xs) 0) 
+                (list 
+                'if (first xs) 
+                    (if (> (count xs) 1) 
+                        (nth xs 1) 
+                        (throw "odd number of forms to cond"))
+                    (cons 'cond (rest (rest xs))))
+                    )))
+    """ "boot")
+    // TODO: Need to get this working
+    ignore (evalString vm """
+    (def! add (fn* (& rest) (+ ;rest)))
+    (add 1 2 3)
+    """)
+
     vm.env
