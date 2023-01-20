@@ -337,8 +337,8 @@ let rec parseTerms (baseInput: PositionAnnotatedCode): VickyValue * PositionAnno
     match input.code with
     //| c :: rest when isSpace c -> 
     //    input <- readN 1 input
+    | '-' :: c :: _ when not (isNum c) -> Symbol("-"), (readN 1 input)
     | c :: _ when isNum c -> parseNumber input
-    | '-' :: c :: _ when isNum c -> parseNumber input
     | ':' :: c :: _ when isIdent c -> parseKeyword (readN 1 input)
     | 'n' :: 'i' :: 'l' :: _ -> Nil, readN 3 input
     | '#' :: _ -> parseComment input
