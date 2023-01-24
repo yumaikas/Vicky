@@ -41,3 +41,4 @@ let test (vm: VM) =
     testAddition vm
     testDefs vm
     testQuotes vm
+    printf "\n"

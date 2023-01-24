@@ -173,6 +173,10 @@ let rec formatValue (value: VickyValue): string =
     | Atom(value) -> $"@{formatValue value.Value}"
 
 let isNum(c: char) = ('0' <= c && c <= '9') || c = '.' || c = '-'
+let isFalse(v: VickyValue) =
+    match v with
+    | Boolean(false) -> true
+    | _ -> true
 
 let listToString (cs: char list) = cs |> Array.ofList |> String
 
@@ -694,7 +698,7 @@ and apply (vm: VM) (newList: VickyValue) =
 and EVAL (vm: VM) (term: VickyValue)  =
     match (macroexpand vm term) with
     | List(l) when l.IsEmpty -> List([])
-    | List(Symbol("def!") :: Symbol(name) :: value :: _) ->
+    | List(Symbol("def") :: Symbol(name) :: value :: _) ->
         let evaled = EVAL vm value
         vm.env.values <- vm.env.values.Add(name, evaled)
         evaled
@@ -720,9 +724,9 @@ and EVAL (vm: VM) (term: VickyValue)  =
         match (EVAL vm cond) with
         | Boolean(false) | Nil -> Nil
         | _ -> EVAL vm true_form
-    | List(Symbol("fn*") :: List(l) :: body ) ->
+    | List(Symbol("fn") :: List(l) :: body ) ->
         Func(Defined(DefinedFunc((genAnonName ()), (List.map termToSymbol l), body, vm.env)))
-    | List(Symbol("defmacro!") :: Symbol(name) :: value :: _) ->
+    | List(Symbol("defmacro") :: Symbol(name) :: value :: _) ->
         let evaled = EVAL vm value
         match evaled with
         | Func(Defined(fn)) -> fn.isMacro <- true
@@ -743,6 +747,12 @@ and EVAL (vm: VM) (term: VickyValue)  =
         let mutable ret = Nil
         for f in forms do
            ret <- EVAL vm f 
+        ret
+    | List(Symbol("while") :: cond :: body) ->
+        let mutable ret = Nil
+        while not (isFalse (EVAL vm cond)) do
+            for form in body do
+                ret <- EVAL vm form
         ret
     | List(_) as term -> 
         let newList = eval_ast vm term
@@ -825,7 +835,16 @@ let fnConcat (args: VickyValue list) (vm: VM) (env: Env) =
 
 let fnPrint (args: VickyValue list) (vm: VM) (env: Env) =
     for arg in args do
-        printf "%A " (formatValue arg)
+        match arg with
+        | Str(s) -> printf "%s" s
+        | v -> printf "%s" (formatValue v)
+    printf "\n"
+    Nil, env
+let fnPrin (args: VickyValue list) (vm: VM) (env: Env) =
+    for arg in args do
+        match arg with
+        | Str(s) -> printf "%s" s
+        | v -> printf "%s" (formatValue v)
     Nil, env
 
 let fnCwd(args: VickyValue list) (vm: VM) (env: Env) =
@@ -844,6 +863,19 @@ let fnOsGetEnv(args: VickyValue list) (vm: VM) (env: Env) =
         let value = Environment.GetEnvironmentVariable(key)
         Str(value), env
     | _ -> raise (TypeError (sprintf "Invalid arguments to os/getenv %A" args))
+
+let fnOsWhich (args: VickyValue list) (vm: VM) (env: Env) =
+    if OperatingSystem.IsLinux() then
+        Keyword("linux"), env
+    elif OperatingSystem.IsWindows() then
+        Keyword("windows"), env
+    elif OperatingSystem.IsBrowser() then
+        Keyword("web"), env
+    elif OperatingSystem.IsMacOS() then
+        Keyword("macos"), env
+    else
+        Keyword("unknown"), env
+        
 
 let fnOsDir(args: VickyValue list) (vm: VM) (env: Env) = 
     match args with
@@ -883,14 +915,16 @@ let defaultEnvValues: Map<Symbol, VickyValue> = (Map.ofList [
     ("swap!", nativeFn "builtin::swap!" fnSwapBang)
     ("cons", nativeFn "builtin::cons" fnCons)
     ("concat", nativeFn "builtin::concat" fnConcat)
-    ("str/split", nativeFn "str::split" fnStrSplit)
-    ("str/join", nativeFn "str::join" fnStrJoin)
-    ("str", nativeFn "str::str" fnStr)
-    ("os/cwd", nativeFn "os::cwd" fnCwd)
-    ("os/cd", nativeFn "os::cd" fnCd)
-    ("os/dir", nativeFn "os::dir" fnOsDir)
-    ("os/getenv", nativeFn "os::getenv" fnOsGetEnv)
+    ("str/split", nativeFn "str/split" fnStrSplit)
+    ("str/join", nativeFn "str/join" fnStrJoin)
+    ("str", nativeFn "str/str" fnStr)
+    ("os/cwd", nativeFn "os/cwd" fnCwd)
+    ("os/cd", nativeFn "os/cd" fnCd)
+    ("os/dir", nativeFn "os/dir" fnOsDir)
+    ("os/getenv", nativeFn "os/getenv" fnOsGetEnv)
+    ("os/which", nativeFn "os/getenv" fnOsGetEnv)
     ("print", nativeFn "builtin::print" fnPrint)
+    ("prin", nativeFn "builtin::prin" fnPrin)
     // ("dofile", nativeFn "builtin::dofile" fnDoFile)
     ("true", Boolean(true))
     ("false", Boolean(false))
@@ -899,15 +933,13 @@ let defaultEnvValues: Map<Symbol, VickyValue> = (Map.ofList [
 let defaultEnv = 
     let env = Env (defaultEnvValues, None)
     let vm = VM(env)
-    ignore (evalString vm "(def! not (fn* (a) (if a false true)))" "boot")
-    ignore (evalString vm "(def! nth get)" "boot") // Will need to change this later
+    ignore (evalString vm """ (defmacro defn (fn (name args & body) ~(def ,name (fn ,args ,;body)))) """ "boot")
+    ignore (evalString vm "(defn not (a) (if a false true))" "boot")
+    ignore (evalString vm "(def nth get)" "boot") // Will need to change this later
+    ignore (evalString vm """(defn load-file (f) (eval (read-string (str "(do " (slurp f) "\nnil)" ))))""" "boot") 
     ignore (evalString vm """
-        (def! load-file 
-            (fn* (f) (eval (read-string (str "(do " (slurp f) "\nnil)" )))))
-    """ "boot") 
-    ignore (evalString vm """
-    (defmacro! cond 
-        (fn* (& xs) 
+    (defmacro cond 
+        (fn (& xs) 
             (if (> (count xs) 0) 
                 (list 
                 'if (first xs) 
@@ -917,10 +949,15 @@ let defaultEnv =
                     (cons 'cond (rest (rest xs))))
                     )))
     """ "boot")
+
     // TODO: Need to get this working
     ignore (evalString vm """
-    (def! add (fn* (& rest) (+ ;rest)))
+    (def add (fn (& rest) (+ ;rest)))
     (add 1 2 3)
+    """)
+
+    ignore (evalString vm """
+    (defn os/home ())
     """)
 
     vm.env

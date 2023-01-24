@@ -8,6 +8,9 @@ let repl(vm: VM) =
     vm.env.values <- vm.env.values.Add(
         "exit", 
         nativeFn "repl::exit" (fun _ _ env  -> exit <- true; List([]), env))
+    vm.env.values <- vm.env.values.Add(
+        "tests/run",
+        nativeFn "tests/run" (fun _ vm _ -> test vm; Nil, vm.env))
 
     while not exit do
         try
@@ -24,10 +27,12 @@ let repl(vm: VM) =
             line = l;
             column = c;
             from = source;
-        }) -> (printfn "Parse failure in %A:%A:%A:\n\t%A" source l c m)
-        | CannotEvalError(m) -> (printfn "%A" m)
-        | InvalidNameException(m) -> (printfn "%A" m)
-        | TypeError(m) -> (printfn "%A" m)
+        }) -> (printfn "Parse failure in %s:%A:%A:\n\t%s" source l c m)
+        | CannotEvalError(m) -> (printfn "%s" m)
+        | InvalidNameException(m) -> (printfn "%s" m)
+        | ArgumentError(m) -> (printfn "%s" m)
+        | TypeError(m) -> (printfn "%s" m)
+        | e -> (printfn "Interpreter Coding error: %s %s" (e.GetType().Name) e.Message)
 
 [<EntryPoint>]
 let main(args) =
