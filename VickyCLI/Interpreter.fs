@@ -176,7 +176,12 @@ let isNum(c: char) = ('0' <= c && c <= '9') || c = '.' || c = '-'
 let isFalse(v: VickyValue) =
     match v with
     | Boolean(false) -> true
-    | _ -> true
+    | _ -> false
+
+let isNil(v: VickyValue) =
+    match v with
+    | Nil -> true
+    | _ -> false
 
 let listToString (cs: char list) = cs |> Array.ofList |> String
 
@@ -500,6 +505,34 @@ let fnGtEq (args: VickyValue list) (vm: VM) (env: Env) =
     | a :: b :: _ -> Boolean(a >= b), env
     | _ -> raise (ArgumentError (sprintf "Cannot call >= with %A args" args.Length))
 
+let fnAnd (args: VickyValue list) (vm: VM) (env: Env)  =
+    let mutable argl = args
+    let mutable keepGoing = true
+    
+    while not argl.Tail.IsEmpty && keepGoing do
+        keepGoing <- not (isFalse argl.Head) && not (isNil argl.Head)
+        if keepGoing then
+            argl <- argl.Tail
+
+    if not argl.IsEmpty then
+        argl.Head, env
+    else
+        Nil, env
+
+let fnOr (args: VickyValue list) (vm: VM) (env: Env)  =
+    let mutable argl = args
+    let mutable keepGoing = true
+    
+    while not argl.Tail.IsEmpty && keepGoing do
+        keepGoing <- (isFalse argl.Head || isNil argl.Head)
+        if keepGoing then
+            argl <- argl.Tail
+
+    if not argl.IsEmpty then
+        argl.Head, env
+    else
+        Nil, env
+
 let fnGet (args: VickyValue list) (vm: VM) (env: Env) = 
     match args with
     | Dict(m) :: key :: _ when m.ContainsKey(key) ->
@@ -548,6 +581,7 @@ let fnPut (args: VickyValue list) (vm: VM) (env: Env) =
         raise (ArgumentError "Index too large for vector!")
     | _ -> 
         Nil, env
+        
 
 let fnStrSplit(args: VickyValue list) (vm: VM) (env: Env) =
     match args with
@@ -578,6 +612,9 @@ let fnStrJoin(args: VickyValue list) (vm: VM) (env: Env) =
 
 let nativeFn name fn =
     Func(VickyFunc.Native(NativeFunc(name, fn)))
+
+let nativeMacro name fn =
+    Func(VickyFunc.Native(NativeFunc(name, fn, true)))
 
 let rec resolveSymbol (symbol: Symbol) (env: Env): VickyValue option =
     if env.values.ContainsKey(symbol) then
@@ -860,8 +897,11 @@ let fnCd(args: VickyValue list) (vm: VM) (env: Env) =
 let fnOsGetEnv(args: VickyValue list) (vm: VM) (env: Env) =
     match args with
     | Str(key) :: _ -> 
-        let value = Environment.GetEnvironmentVariable(key)
-        Str(value), env
+        let osEnv = Environment.GetEnvironmentVariables()
+        if osEnv.Contains(key) then
+            Str(string(osEnv.Item key)), env
+        else
+            Nil, env
     | _ -> raise (TypeError (sprintf "Invalid arguments to os/getenv %A" args))
 
 let fnOsWhich (args: VickyValue list) (vm: VM) (env: Env) =
@@ -876,6 +916,11 @@ let fnOsWhich (args: VickyValue list) (vm: VM) (env: Env) =
     else
         Keyword("unknown"), env
         
+let fnOsPathExistsPred(args: VickyValue list) (vm: VM) (env: Env) =
+    match args with
+    | Str(path) :: _ -> Boolean(File.Exists(path) || Directory.Exists(path)), env
+    | _ -> raise (TypeError (sprintf "Invalid arguments to os/path-exists? %A" args))
+
 
 let fnOsDir(args: VickyValue list) (vm: VM) (env: Env) = 
     match args with
@@ -887,6 +932,20 @@ let fnOsDir(args: VickyValue list) (vm: VM) (env: Env) =
             List.map (fun s -> Str(s)) (Directory.EnumerateFileSystemEntries(".") |> List.ofSeq )), env
     | _ -> raise (TypeError (sprintf "Invalid arguments to os/dir %A" args))
 
+let fnFnBody(args: VickyValue list) (vm: VM) (env: Env) =
+    match args with
+    | Func(Defined fn) :: _ -> List(fn.body), env
+    | _ -> raise (TypeError (sprintf "Invalid arguments to fn/body %A" args))
+
+let fnSet (args: VickyValue list) (vm: VM) (env: Env) =
+    match args with
+    | Symbol(name) :: value :: _ when env.values.ContainsKey name ->
+        env.values <- env.values.Change(name, (fun v -> Some (EVAL vm value)))
+        value, env
+    | Symbol(name) :: _ :: _ when not (env.values.ContainsKey name) -> 
+        raise(ArgumentError (sprintf "Tried to set variable %s that doesn't exist!" name))
+    | _ -> raise (ArgumentError (sprintf "Invalid call to set with arguments: %A" args))
+
 let defaultEnvValues: Map<Symbol, VickyValue> = (Map.ofList [
     ("+", nativeFn "builtin::+" fnAdd)
     ("*", nativeFn "builtin::*" fnMultiply)
@@ -897,6 +956,8 @@ let defaultEnvValues: Map<Symbol, VickyValue> = (Map.ofList [
     (">", nativeFn "builtin::>" fnGt)
     (">=", nativeFn "builtin::>=" fnGtEq)
     ("<=", nativeFn "builtin::<=" fnLtEq)
+    ("or", nativeFn "builtin::or" fnOr)
+    ("and", nativeFn "builtin::and" fnAnd)
     ("list", nativeFn "builtin::list" fnList)
     ("list?", nativeFn "builtin::list?" fnListPred)
     ("empty?", nativeFn "builtin::list?" fnEmptyPred)
@@ -906,6 +967,7 @@ let defaultEnvValues: Map<Symbol, VickyValue> = (Map.ofList [
     ("eval", nativeFn "builtin::eval" fnEval)
     ("get", nativeFn "builtin::get" fnGet)
     ("put", nativeFn "builtin::put" fnPut)
+    ("set", nativeMacro "builtin::set" fnSet)
     ("first", nativeFn "builtin::first" fnFirst)
     ("rest", nativeFn "builtin::rest" fnRest)
     ("atom", nativeFn "builtin::atom" fnAtom)
@@ -922,10 +984,12 @@ let defaultEnvValues: Map<Symbol, VickyValue> = (Map.ofList [
     ("os/cd", nativeFn "os/cd" fnCd)
     ("os/dir", nativeFn "os/dir" fnOsDir)
     ("os/getenv", nativeFn "os/getenv" fnOsGetEnv)
-    ("os/which", nativeFn "os/getenv" fnOsGetEnv)
+    ("os/which", nativeFn "os/which" fnOsWhich)
+    ("os/path-exists?", nativeFn "os/path-exists?" fnOsPathExistsPred)
     ("print", nativeFn "builtin::print" fnPrint)
     ("prin", nativeFn "builtin::prin" fnPrin)
     // ("dofile", nativeFn "builtin::dofile" fnDoFile)
+    ("fn/body", nativeFn "fn/body" fnFnBody)
     ("true", Boolean(true))
     ("false", Boolean(false))
 ])
@@ -933,7 +997,7 @@ let defaultEnvValues: Map<Symbol, VickyValue> = (Map.ofList [
 let defaultEnv = 
     let env = Env (defaultEnvValues, None)
     let vm = VM(env)
-    ignore (evalString vm """ (defmacro defn (fn (name args & body) ~(def ,name (fn ,args ,;body)))) """ "boot")
+    ignore (evalString vm """ (defmacro defn (fn (name args & body) ~(def ,name (fn ,args ;body)))) """ "boot")
     ignore (evalString vm "(defn not (a) (if a false true))" "boot")
     ignore (evalString vm "(def nth get)" "boot") // Will need to change this later
     ignore (evalString vm """(defn load-file (f) (eval (read-string (str "(do " (slurp f) "\nnil)" ))))""" "boot") 
@@ -950,14 +1014,18 @@ let defaultEnv =
                     )))
     """ "boot")
 
-    // TODO: Need to get this working
-    ignore (evalString vm """
-    (def add (fn (& rest) (+ ;rest)))
-    (add 1 2 3)
-    """)
 
     ignore (evalString vm """
-    (defn os/home ())
-    """)
+    (defn os/homeForOs (osName) 
+        (cond 
+            (= osName :windows) 
+                (or (os/getenv "HOME") (os/getenv "USERPROFILE")) 
+            true 
+                (or (os/getenv "HOME") "")) )
+    (defn os/home ()
+        (let* (osName (os/which))
+            (os/homeForOs osName) )
+    )
+    """ """boot""")
 
     vm.env
