@@ -88,7 +88,7 @@ and NativeFunc =
             | _ -> -1
 
 and DefinedFunc =
-    val fullName: string
+    val mutable fullName: string
     val args: Symbol list
     val defEnv: Env
     val body: VickyValue list
@@ -119,9 +119,9 @@ and VickyFunc =
     | Defined of DefinedFunc
 
 and Env = 
-    val mutable values: Map<Symbol, VickyValue>
+    val mutable values: Map<VickyValue, VickyValue>
     val mutable parent: Env option
-    new(startingValues: Map<Symbol, VickyValue>, parent: Env option ) = {values = startingValues; parent = parent}
+    new(startingValues: Map<VickyValue, VickyValue>, parent: Env option ) = {values = startingValues; parent = parent}
 
 
 and VM = 
@@ -148,7 +148,7 @@ let asList (value: VickyValue) =
     | Nil -> []
     | _ -> raise (TypeError (sprintf "Tried to cast non-list %A to list!" value))
 
-let addToEnv (env: Env) (key: Symbol) (value: VickyValue) =
+let addToEnv (env: Env) (key: VickyValue) (value: VickyValue) =
     env.values <- env.values.Add(key, value)
     env
 
@@ -171,6 +171,9 @@ let rec formatValue (value: VickyValue): string =
     | Keyword(k) -> $":{k}"
     | Nil -> "nil"
     | Atom(value) -> $"@{formatValue value.Value}"
+
+let formatArgs (args: VickyValue list) =
+    formatValue(List(args))
 
 let isNum(c: char) = ('0' <= c && c <= '9') || c = '.' || c = '-'
 let isFalse(v: VickyValue) =
@@ -201,7 +204,7 @@ let isAlNum(c: char) = isLetter c || isNum c
 let isIdent(c: char) =
     match c with 
     | c when isAlNum c -> true
-    | '+' | '-' | '/' | '*' | '$' | '%' | '@' 
+    | '+' | '-' | '/' | '*' | '$' | '%' | '@' | '_' 
     | '!' | '?' | '^' | '&' | '<' | '>' | '.' | '=' -> true
     | _ -> false
 
@@ -482,7 +485,7 @@ let fnCount (args: VickyValue list) (vm: VM) (env: Env) =
 
 let fnEq (args: VickyValue list) (vm: VM) (env: Env) =
     match args with
-    | a :: b :: _ -> Boolean(a = b), env
+    | a :: b :: [] ->  Boolean(a = b), env
     | _ -> raise (ArgumentError (sprintf "Cannot call = with %A args" args.Length))
 
 let fnLt (args: VickyValue list) (vm: VM) (env: Env) =
@@ -589,7 +592,7 @@ let fnStrSplit(args: VickyValue list) (vm: VM) (env: Env) =
         List(s.Split(delim) |> Seq.map (fun s -> Str(s)) |> List.ofSeq), env
     | [Str(s)] -> 
         List(s.Split(' ') |> Seq.map (fun s -> Str(s)) |> List.ofSeq), env
-    | v -> raise (TypeError (sprintf "Invalid arguments to str/split %A" args))
+    | v -> raise (TypeError (sprintf "Invalid arguments to str/split %s" (formatArgs args)))
 
 let fnStr(args: VickyValue list) (vm: VM) (env: Env) =
     Str(String.Join("", (List.map 
@@ -608,7 +611,7 @@ let fnStrJoin(args: VickyValue list) (vm: VM) (env: Env) =
             | Str(s) -> s
             | v -> formatValue v
         ) parts))), env
-    | v -> raise (TypeError (sprintf "Invalid arguments to str/join %A" args))
+    | v -> raise (TypeError (sprintf "Invalid arguments to str/join %s" (formatArgs args)))
 
 let nativeFn name fn =
     Func(VickyFunc.Native(NativeFunc(name, fn)))
@@ -617,8 +620,8 @@ let nativeMacro name fn =
     Func(VickyFunc.Native(NativeFunc(name, fn, true)))
 
 let rec resolveSymbol (symbol: Symbol) (env: Env): VickyValue option =
-    if env.values.ContainsKey(symbol) then
-        Some env.values[symbol]
+    if env.values.ContainsKey(VickyValue.Symbol(symbol)) then
+        Some env.values[VickyValue.Symbol(symbol)]
     elif env.parent.IsNone then
         None
     else
@@ -677,7 +680,7 @@ and macroexpand (vm: VM) (term: VickyValue) =
         match resultingTerm with
         | List(Symbol(s) :: args) as maybeMacro when isMacroCall vm.env maybeMacro ->
             resultingTerm <- apply vm (List((resolveSymbolOrDie s vm.env) :: args))
-        | _ -> raise (CannotEvalError (sprintf "Should Not Happen in Macroexpand! %A" resultingTerm))
+        | _ -> raise (CannotEvalError (sprintf "Should Not Happen in Macroexpand! %s" (formatValue resultingTerm)))
     resultingTerm
 
 and unspliceArgs (args: VickyValue list) (vm: VM) =
@@ -712,11 +715,11 @@ and apply (vm: VM) (newList: VickyValue) =
         while not currentArgName.IsEmpty do
             match currentArgName with
             | "&" :: restArgName :: _ -> 
-                vm.env <- addToEnv vm.env restArgName (List(currentArgValue))
+                vm.env <- addToEnv vm.env (VickyValue.Symbol restArgName) (List(currentArgValue))
                 currentArgName <- []
                 currentArgValue <- []
             | argName :: _ -> 
-                vm.env <- addToEnv vm.env argName currentArgValue.Head
+                vm.env <- addToEnv vm.env (VickyValue.Symbol argName) currentArgValue.Head
                 currentArgValue <- currentArgValue.Tail
                 currentArgName <- currentArgName.Tail
             | _ -> ()
@@ -737,7 +740,7 @@ and EVAL (vm: VM) (term: VickyValue)  =
     | List(l) when l.IsEmpty -> List([])
     | List(Symbol("def") :: Symbol(name) :: value :: _) ->
         let evaled = EVAL vm value
-        vm.env.values <- vm.env.values.Add(name, evaled)
+        vm.env.values <- vm.env.values.Add(Symbol(name), evaled)
         evaled
     | List(Symbol("let*") :: List(bindings) :: expr :: _) ->
         let mutable curEnv = Env(Map.empty, Some vm.env)
@@ -747,7 +750,7 @@ and EVAL (vm: VM) (term: VickyValue)  =
             match binding with
             | [Symbol(name); term] -> 
                 ret <- (EVAL vm term)
-                vm.env <- addToEnv vm.env name ret    
+                vm.env <- addToEnv vm.env (Symbol name) ret    
             | _ -> raise (InvalidNameException (sprintf "Invalid binding %A" binding)) 
         let ret = EVAL vm expr
         vm.env <- vm.env.parent.Value
@@ -763,14 +766,10 @@ and EVAL (vm: VM) (term: VickyValue)  =
         | _ -> EVAL vm true_form
     | List(Symbol("fn") :: List(l) :: body ) ->
         Func(Defined(DefinedFunc((genAnonName ()), (List.map termToSymbol l), body, vm.env)))
-    | List(Symbol("defmacro") :: Symbol(name) :: value :: _) ->
-        let evaled = EVAL vm value
-        match evaled with
-        | Func(Defined(fn)) -> fn.isMacro <- true
-        | Func(Native(fn)) -> fn.isMacro <- true
-        | _ -> ()
-        vm.env.values <- vm.env.values.Add(name, evaled)
-        evaled
+    | List(Symbol("defmacro") :: Symbol(name) :: List(args) :: body) ->
+        let mac = Func(Defined(DefinedFunc(name, (List.map termToSymbol args), body, vm.env, true)))
+        vm.env.values <- vm.env.values.Add(Symbol name, mac)
+        mac
     | List(Symbol("quote") :: arg :: _) ->
         arg
     | List(Symbol("splice") :: _) as form ->
@@ -811,26 +810,33 @@ let evalString(vm: VM) (code: string) (from: string) =
 
 let fnSlurp (args: VickyValue list) (vm: VM) (env: Env) =
     match args with
-    | Str(path) :: _ -> Str(File.ReadAllText(path)), env
-    | _ -> raise (TypeError (sprintf "Invalid arguments to slurp %A" args))
+    | Str(path) :: [] -> Str(File.ReadAllText(path)), env
+    | _ -> raise (TypeError (sprintf "Invalid arguments to slurp %s" (formatArgs args)))
+
+let fnSpit (args: VickyValue list) (vm: VM) (env: Env) =
+    match args with
+    | Str(path) :: Str(contents) :: [] -> 
+        File.WriteAllText(path, contents)
+        Nil, env
+    | _ -> raise (TypeError (sprintf "Invalid arguments to slurp %s" (formatArgs args)))
 
 let fnRead (args: VickyValue list) (vm: VM) (env: Env) =
     match args with
     | Str(input) :: _ -> 
         let (terms, _) = parse (posFromSource (input |> List.ofSeq) "read") None
         terms.Head, env
-    | _ -> raise (TypeError (sprintf "Invalid arguments to slurp read-string %A" args))
+    | _ -> raise (TypeError (sprintf "Invalid arguments to slurp read-string %s" (formatArgs args)))
     
 let fnEval (args: VickyValue list) (vm: VM) (env: Env) =
     match args with
     | prog :: _ -> 
         EVAL vm prog, env 
-    | _ -> raise (TypeError (sprintf "Invalid arguments to eval %A" args))
+    | _ -> raise (TypeError (sprintf "Invalid arguments to eval %s" (formatArgs args)))
 
 let fnAtom (args: VickyValue list) (vm: VM) (env: Env) =
     match args with
     | value :: _ -> Atom(ref value), env
-    | _ -> raise (TypeError (sprintf "Invalid arguments to atom %A" args))
+    | _ -> raise (TypeError (sprintf "Invalid arguments to atom %s" (formatArgs args)))
 
 let fnAtomPred (args: VickyValue list) (vm: VM) (env: Env) =
     match args with
@@ -840,14 +846,14 @@ let fnAtomPred (args: VickyValue list) (vm: VM) (env: Env) =
 let fnDeref (args: VickyValue list) (vm: VM) (env: Env) =
     match args with
     | Atom(value) :: _ -> value.Value, env
-    | _ -> raise (TypeError (sprintf "Invalid arguments to deref %A" args))
+    | _ -> raise (TypeError (sprintf "Invalid arguments to deref %s" (formatArgs args)))
 
 let fnResetBang (args: VickyValue list) (vm: VM) (env: Env) =
     match args with
     | Atom(value) :: newValue :: _ -> 
         value.Value <- newValue
         newValue, env
-    | _ -> raise (TypeError (sprintf "Invalid arguments to deref %A" args))
+    | _ -> raise (TypeError (sprintf "Invalid arguments to reset! %s" (formatArgs args)))
 
 let fnSwapBang (args: VickyValue list) (vm: VM) (env: Env) =
     match args with
@@ -855,20 +861,20 @@ let fnSwapBang (args: VickyValue list) (vm: VM) (env: Env) =
         apply vm (VickyValue.List(head :: value.Value :: rest)), env
     | Atom(value) :: (VickyValue.Func(VickyFunc.Native(fn)) as head) :: rest -> 
         apply vm (VickyValue.List(head :: value.Value :: rest)), env
-    | _ -> raise (TypeError (sprintf "Invalid arguments to deref %A" args))
+    | _ -> raise (TypeError (sprintf "Invalid arguments to swap! %s" (formatArgs args)))
 
 let fnCons (args: VickyValue list) (vm: VM) (env: Env) =
     match args with
     | value :: List(l) :: _ -> List(value :: l), env
     | value :: Nil :: _ -> List([value]), env
-    | _ -> raise (TypeError (sprintf "Cannot cons using %A" args))
+    | _ -> raise (TypeError (sprintf "Cannot cons using %s" (formatArgs args)))
 
 let fnConcat (args: VickyValue list) (vm: VM) (env: Env) =
     match args with
     | lists when List.forall isList lists -> 
         let toConcat = List.map asList lists
         VickyValue.List(List.concat (toConcat |> Seq.ofList)), env
-    | _ -> raise (TypeError (sprintf "Cannot cons using %A" args))
+    | _ -> raise (TypeError (sprintf "Cannot cons using %s" (formatArgs args)))
 
 let fnPrint (args: VickyValue list) (vm: VM) (env: Env) =
     for arg in args do
@@ -892,7 +898,7 @@ let fnCd(args: VickyValue list) (vm: VM) (env: Env) =
     | Str(path) :: _ -> 
         Directory.SetCurrentDirectory(path)
         Str(Directory.GetCurrentDirectory()), env
-    | _ -> raise (TypeError (sprintf "Invalid arguments to os/cd %A" args))
+    | _ -> raise (TypeError (sprintf "Invalid arguments to os/cd %s" (formatArgs args)))
 
 let fnOsGetEnv(args: VickyValue list) (vm: VM) (env: Env) =
     match args with
@@ -902,7 +908,8 @@ let fnOsGetEnv(args: VickyValue list) (vm: VM) (env: Env) =
             Str(string(osEnv.Item key)), env
         else
             Nil, env
-    | _ -> raise (TypeError (sprintf "Invalid arguments to os/getenv %A" args))
+    | _ -> raise (TypeError (sprintf "Invalid arguments to os/getenv %A" (formatArgs args)))
+
 
 let fnOsWhich (args: VickyValue list) (vm: VM) (env: Env) =
     if OperatingSystem.IsLinux() then
@@ -919,7 +926,7 @@ let fnOsWhich (args: VickyValue list) (vm: VM) (env: Env) =
 let fnOsPathExistsPred(args: VickyValue list) (vm: VM) (env: Env) =
     match args with
     | Str(path) :: _ -> Boolean(File.Exists(path) || Directory.Exists(path)), env
-    | _ -> raise (TypeError (sprintf "Invalid arguments to os/path-exists? %A" args))
+    | _ -> raise (TypeError (sprintf "Invalid arguments to os/path-exists? %A" (formatArgs args)))
 
 
 let fnOsDir(args: VickyValue list) (vm: VM) (env: Env) = 
@@ -930,80 +937,91 @@ let fnOsDir(args: VickyValue list) (vm: VM) (env: Env) =
     | [] -> 
         List(
             List.map (fun s -> Str(s)) (Directory.EnumerateFileSystemEntries(".") |> List.ofSeq )), env
-    | _ -> raise (TypeError (sprintf "Invalid arguments to os/dir %A" args))
+    | _ -> raise (TypeError (sprintf "Invalid arguments to os/dir %A" (formatArgs args)))
 
 let fnFnBody(args: VickyValue list) (vm: VM) (env: Env) =
     match args with
     | Func(Defined fn) :: _ -> List(fn.body), env
-    | _ -> raise (TypeError (sprintf "Invalid arguments to fn/body %A" args))
+    | _ -> raise (TypeError (sprintf "Invalid arguments to fn/body %A" (formatArgs args)))
+
+let fnWithName(args: VickyValue list) (vm: VM) (env: Env) =
+    match args with
+    | Symbol(name) :: Func(Defined fn) :: _ -> 
+        fn.fullName <- name
+        Func(Defined fn), env
+    | _ -> raise (TypeError (sprintf "Invalid arguments to fn/body %A" (formatArgs args)))
+
+let fnEnv(args: VickyValue list) (vm: VM) (env: Env) =
+    Dict(env.values), env
 
 let fnSet (args: VickyValue list) (vm: VM) (env: Env) =
     match args with
-    | Symbol(name) :: value :: _ when env.values.ContainsKey name ->
-        env.values <- env.values.Change(name, (fun v -> Some (EVAL vm value)))
+    | Symbol(name) :: value :: _ when env.values.ContainsKey (Symbol name) ->
+        env.values <- env.values.Change((Symbol name), (fun v -> Some (EVAL vm value)))
         value, env
-    | Symbol(name) :: _ :: _ when not (env.values.ContainsKey name) -> 
+    | Symbol(name) :: _ :: _ when not (env.values.ContainsKey (Symbol name)) -> 
         raise(ArgumentError (sprintf "Tried to set variable %s that doesn't exist!" name))
-    | _ -> raise (ArgumentError (sprintf "Invalid call to set with arguments: %A" args))
+    | _ -> raise (ArgumentError (sprintf "Invalid call to set with arguments: %A" (formatArgs args)))
 
-let defaultEnvValues: Map<Symbol, VickyValue> = (Map.ofList [
-    ("+", nativeFn "builtin::+" fnAdd)
-    ("*", nativeFn "builtin::*" fnMultiply)
-    ("-", nativeFn "builtin::-" fnSubtract)
-    ("/", nativeFn "builtin::/" fnDivide)
-    ("=", nativeFn "builtin::=" fnEq)
-    ("<", nativeFn "builtin::<" fnLt)
-    (">", nativeFn "builtin::>" fnGt)
-    (">=", nativeFn "builtin::>=" fnGtEq)
-    ("<=", nativeFn "builtin::<=" fnLtEq)
-    ("or", nativeFn "builtin::or" fnOr)
-    ("and", nativeFn "builtin::and" fnAnd)
-    ("list", nativeFn "builtin::list" fnList)
-    ("list?", nativeFn "builtin::list?" fnListPred)
-    ("empty?", nativeFn "builtin::list?" fnEmptyPred)
-    ("count", nativeFn "builtin::count" fnCount)
-    ("slurp", nativeFn "builtin::slurp" fnSlurp)
-    ("read-str", nativeFn "builtin::read-str" fnRead)
-    ("eval", nativeFn "builtin::eval" fnEval)
-    ("get", nativeFn "builtin::get" fnGet)
-    ("put", nativeFn "builtin::put" fnPut)
-    ("set", nativeMacro "builtin::set" fnSet)
-    ("first", nativeFn "builtin::first" fnFirst)
-    ("rest", nativeFn "builtin::rest" fnRest)
-    ("atom", nativeFn "builtin::atom" fnAtom)
-    ("atom?", nativeFn "builtin::atom?" fnAtomPred)
-    ("deref", nativeFn "builtin::deref" fnDeref)
-    ("reset!", nativeFn "builtin::reset!" fnResetBang)
-    ("swap!", nativeFn "builtin::swap!" fnSwapBang)
-    ("cons", nativeFn "builtin::cons" fnCons)
-    ("concat", nativeFn "builtin::concat" fnConcat)
-    ("str/split", nativeFn "str/split" fnStrSplit)
-    ("str/join", nativeFn "str/join" fnStrJoin)
-    ("str", nativeFn "str/str" fnStr)
-    ("os/cwd", nativeFn "os/cwd" fnCwd)
-    ("os/cd", nativeFn "os/cd" fnCd)
-    ("os/dir", nativeFn "os/dir" fnOsDir)
-    ("os/getenv", nativeFn "os/getenv" fnOsGetEnv)
-    ("os/which", nativeFn "os/which" fnOsWhich)
-    ("os/path-exists?", nativeFn "os/path-exists?" fnOsPathExistsPred)
-    ("print", nativeFn "builtin::print" fnPrint)
-    ("prin", nativeFn "builtin::prin" fnPrin)
-    // ("dofile", nativeFn "builtin::dofile" fnDoFile)
-    ("fn/body", nativeFn "fn/body" fnFnBody)
-    ("true", Boolean(true))
-    ("false", Boolean(false))
-])
+let defaultEnvValues: Map<VickyValue, VickyValue> = (Map.ofList [
+    (Symbol "+", nativeFn "builtin::+" fnAdd)
+    (Symbol "*", nativeFn "builtin::*" fnMultiply)
+    (Symbol "-", nativeFn "builtin::-" fnSubtract)
+    (Symbol "/", nativeFn "builtin::/" fnDivide)
+    (Symbol "=", nativeFn "builtin::=" fnEq)
+    (Symbol "<", nativeFn "builtin::<" fnLt)
+    (Symbol ">", nativeFn "builtin::>" fnGt)
+    (Symbol ">=", nativeFn "builtin::>=" fnGtEq)
+    (Symbol "<=", nativeFn "builtin::<=" fnLtEq)
+    (Symbol "or", nativeFn "builtin::or" fnOr)
+    (Symbol "and", nativeFn "builtin::and" fnAnd)
+    (Symbol "list", nativeFn "builtin::list" fnList)
+    (Symbol "list?", nativeFn "builtin::list?" fnListPred)
+    (Symbol "empty?", nativeFn "builtin::list?" fnEmptyPred)
+    (Symbol "count", nativeFn "builtin::count" fnCount)
+    (Symbol "slurp", nativeFn "builtin::slurp" fnSlurp)
+    (Symbol "spit", nativeFn "spit" fnSpit)
+    (Symbol "read-str", nativeFn "builtin::read-str" fnRead)
+    (Symbol "eval", nativeFn "builtin::eval" fnEval)
+    (Symbol "get", nativeFn "builtin::get" fnGet)
+    (Symbol "put", nativeFn "builtin::put" fnPut)
+    (Symbol "set", nativeMacro "builtin::set" fnSet)
+    (Symbol "first", nativeFn "builtin::first" fnFirst)
+    (Symbol "rest", nativeFn "builtin::rest" fnRest)
+    (Symbol "atom", nativeFn "builtin::atom" fnAtom)
+    (Symbol "atom?", nativeFn "builtin::atom?" fnAtomPred)
+    (Symbol "deref", nativeFn "builtin::deref" fnDeref)
+    (Symbol "reset!", nativeFn "builtin::reset!" fnResetBang)
+    (Symbol "swap!", nativeFn "builtin::swap!" fnSwapBang)
+    (Symbol "cons", nativeFn "builtin::cons" fnCons)
+    (Symbol "concat", nativeFn "builtin::concat" fnConcat)
+    (Symbol "str/split", nativeFn "str/split" fnStrSplit)
+    (Symbol "str/join", nativeFn "str/join" fnStrJoin)
+    (Symbol "str", nativeFn "str/str" fnStr)
+    (Symbol "os/cwd", nativeFn "os/cwd" fnCwd)
+    (Symbol "os/cd", nativeFn "os/cd" fnCd)
+    (Symbol "os/dir", nativeFn "os/dir" fnOsDir)
+    (Symbol "os/getenv", nativeFn "os/getenv" fnOsGetEnv)
+    (Symbol "os/which", nativeFn "os/which" fnOsWhich)
+    (Symbol "os/path-exists?", nativeFn "os/path-exists?" fnOsPathExistsPred)
+    (Symbol "print", nativeFn "builtin::print" fnPrint)
+    (Symbol "prin", nativeFn "builtin::prin" fnPrin)
+    (Symbol "fn/body", nativeFn "fn/body" fnFnBody)
+    (Symbol "fn/with-name", nativeFn "fn/with-name" fnWithName)
+
+    (Symbol "true", Boolean(true))
+    (Symbol "false", Boolean(false))
+]) 
 
 let defaultEnv = 
     let env = Env (defaultEnvValues, None)
     let vm = VM(env)
-    ignore (evalString vm """ (defmacro defn (fn (name args & body) ~(def ,name (fn ,args ;body)))) """ "boot")
+    ignore (evalString vm """ (defmacro defn (name args & body) ~(def ,name (fn/with-name ',name (fn ,args ;body))))""" "boot")
     ignore (evalString vm "(defn not (a) (if a false true))" "boot")
     ignore (evalString vm "(def nth get)" "boot") // Will need to change this later
     ignore (evalString vm """(defn load-file (f) (eval (read-string (str "(do " (slurp f) "\nnil)" ))))""" "boot") 
     ignore (evalString vm """
-    (defmacro cond 
-        (fn (& xs) 
+    (defmacro cond (& xs) 
             (if (> (count xs) 0) 
                 (list 
                 'if (first xs) 
@@ -1011,7 +1029,7 @@ let defaultEnv =
                         (nth xs 1) 
                         (throw "odd number of forms to cond"))
                     (cons 'cond (rest (rest xs))))
-                    )))
+                    ))
     """ "boot")
 
 
@@ -1024,8 +1042,20 @@ let defaultEnv =
                 (or (os/getenv "HOME") "")) )
     (defn os/home ()
         (let* (osName (os/which))
-            (os/homeForOs osName) )
-    )
+            (os/homeForOs osName) ) )
+
+
+    (let* 
+        (
+        oldLoc (os/cwd)
+        _ (os/cd (os/home))
+        ret (if (os/path-exists? ".vicky_profile")
+                (load-file ".vicky_profile"))
+        ) 
+        (do 
+            (os/cd oldLoc)
+            ret))
+
     """ """boot""")
 
     vm.env

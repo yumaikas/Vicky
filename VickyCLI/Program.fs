@@ -6,10 +6,9 @@ let repl(vm: VM) =
     let mutable exit = false
     let mutable evalLine = 0
     vm.env.values <- vm.env.values.Add(
-        "exit", 
+        Symbol "exit", 
         nativeFn "repl::exit" (fun _ _ env  -> exit <- true; List([]), env))
-    vm.env.values <- vm.env.values.Add(
-        "tests/run",
+    vm.env.values <- vm.env.values.Add( Symbol "tests/run",
         nativeFn "tests/run" (fun _ vm _ -> test vm; Nil, vm.env))
 
     while not exit do
