@@ -1,15 +1,18 @@
 ﻿open Interpreter
-open Tests
+// open Tests
 open System
 
 let repl(vm: VM) =
+    let start = DateTime.Now.Ticks
     let mutable exit = false
     let mutable evalLine = 0
     vm.env.values <- vm.env.values.Add(
         Symbol "exit", 
         nativeFn "repl::exit" (fun _ _ env  -> exit <- true; List([]), env))
-    vm.env.values <- vm.env.values.Add( Symbol "tests/run",
-        nativeFn "tests/run" (fun _ vm _ -> test vm; Nil, vm.env))
+  //  vm.env.values <- vm.env.values.Add( Symbol "tests/run",
+  //      nativeFn "tests/run" (fun _ vm _ -> test vm; Nil, vm.env))
+    let endTime = DateTime.Now.Ticks
+    printfn "REPL startup time: %A" (endTime - start)
 
     while not exit do
         try
@@ -35,9 +38,9 @@ let repl(vm: VM) =
 
 [<EntryPoint>]
 let main(args) =
-    let env = defaultEnv
-    let vm = VM(env)
-    // test vm
-    printfn ""
+    let start = DateTime.Now.Ticks
+    let vm = defaultVm
+    let endTime = DateTime.Now.Ticks
+    printf "startup time: %A\n" (endTime - start)
     repl vm
     0
